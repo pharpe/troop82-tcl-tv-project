@@ -15,3 +15,7 @@ troop82-launcher/build/
 # Local-only settings (sheet link)
 local.env
 /apps-script/
+heal.log
+heal.log.tmp
+tv-address.txt
+routine-*.json
