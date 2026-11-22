@@ -1,0 +1,10 @@
+com.google.android.apps.tv.dreamx
+com.realtek.airplay2
+com.tcl.airplay2
+android.autoinstalls.config.google.gtvpai
+com.tcl.tv.tclhome_passive
+com.tcl.gamebar
+com.google.android.marvin.talkback
+com.google.android.syncadapters.calendar
+com.android.printspooler
+com.android.wallpaper.livepicker

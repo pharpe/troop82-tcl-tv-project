@@ -1,0 +1,17 @@
+# Build tools (JDK + Android SDK, ~1 GB) — reinstall per README
+/tools/
+# Screenshots and local backups
+/backup/
+# Build output
+troop82-launcher/build/
+*.apk
+*.idsig
+# Signing key: never commit. Keep a copy somewhere safe (see README).
+*.keystore
+*.jks
+# Downloaded calendar caches and test output
+/announce/
+/launcher/
+# Local-only settings (sheet link)
+local.env
+/apps-script/

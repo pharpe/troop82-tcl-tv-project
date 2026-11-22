@@ -1,0 +1,8 @@
+com.disney.disneyplus
+com.hulu.livingroomplus
+com.google.android.youtube.tv
+com.apple.atve.androidtv.appletv
+com.wbd.stream
+com.tubitv
+com.instagram.airwave
+com.ncaa.mmlive.app
