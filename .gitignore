@@ -17,5 +17,5 @@ local.env
 /apps-script/
 heal.log
 heal.log.tmp
-tv-address.txt
+tv-addresses.txt
 routine-*.json

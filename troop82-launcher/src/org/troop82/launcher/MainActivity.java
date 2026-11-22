@@ -38,6 +38,7 @@ public class MainActivity extends Activity implements Tiles.FocusListener {
             "com.google.android.youtube.tvunplugged",
             "ar.tvplayer.tv",
             "org.smarttube.beta",
+            "com.liskovsoft.smarttubetv.beta",  // older SmartTube builds use this package name
             "com.netflix.ninja",
     };
 

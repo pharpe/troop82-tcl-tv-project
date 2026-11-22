@@ -8,7 +8,9 @@ Setup, debloat and a custom home screen for Troop 82's TCL Google TV
 | Path | What it is |
 |---|---|
 | `troop82-launcher/` | Custom home screen + screensaver app (plain Java, no Gradle) |
-| `qa.sh` | Health check, about 50 checks. Run it after any TV firmware update |
+| `setup-tv.sh <ip>` | Applies the complete setup to another identical TV (used for the second TV) |
+| `qa.sh [ip]` | Health check, about 50 checks per TV |
+| `heal.sh` + `install-heal-task.ps1` | Daily Windows task: finds every TV in `tv-addresses.txt` (and rescans if an address changes) and re-applies the setup if a TCL update changed anything |
 | `phase1-packages.txt` | Every app disabled during debloat |
 | `undo-phase1.sh`, `undo-phase3.sh` | Re-enable debloated apps / restore the Google TV home screen |
 | `TCL-TV-plan.md` | Original findings and plan |

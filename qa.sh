@@ -2,7 +2,7 @@
 # Troop 82 TV health check. Run from Git Bash: /c/tcl/qa.sh
 # Prints PASS/FAIL/WARN per check and a summary. Safe to re-run any time
 # (it opens apps and returns Home, but changes no settings).
-TV=192.168.1.174:5555
+TV="${1:-192.168.1.174}"; case "$TV" in *:*) ;; *) TV="$TV:5555";; esac
 A="adb -s $TV shell"
 LAUNCHER=org.troop82.launcher
 pass=0; fail=0; warn=0
@@ -24,7 +24,8 @@ $A input keyevent KEYCODE_BACK; sleep 1
 [ "$(top)" = "$LAUNCHER" ] && ok "Back on home stays on home" || bad "Back left the home screen"
 
 echo "== Apps launch and Home returns"
-for p in com.plexapp.android com.google.android.youtube.tvunplugged ar.tvplayer.tv org.smarttube.beta com.netflix.ninja com.esaba.downloader com.android.vending; do
+st=org.smarttube.beta; sh_ "pm list packages -e $st" | grep -q . || st=com.liskovsoft.smarttubetv.beta
+for p in com.plexapp.android com.google.android.youtube.tvunplugged ar.tvplayer.tv $st com.netflix.ninja com.esaba.downloader com.android.vending; do
   if ! sh_ "pm list packages -e $p" | grep -qx "package:$p"; then bad "$p missing or disabled"; continue; fi
   sh_ "monkey -p $p -c android.intent.category.LEANBACK_LAUNCHER 1" >/dev/null; sleep 5
   t=$(top)

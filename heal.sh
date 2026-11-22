@@ -8,10 +8,20 @@ LOG=./heal.log
 LAUNCHER=org.troop82.launcher
 log() { echo "$(date '+%Y-%m-%d %H:%M') $*" >> "$LOG"; }
 
-# --- find the TV (saved address first, then scan the local network) ---------
-TV=$(cat tv-address.txt 2>/dev/null || echo 192.168.1.174:5555)
-adb connect "$TV" >/dev/null 2>&1
-if [ "$(adb -s "$TV" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; then
+# Run a command with a time limit (coreutils timeout can't wrap Windows adb.exe in Git Bash).
+limit() { secs=$1; shift; out=$(mktemp)
+  "$@" >"$out" 2>/dev/null </dev/null & pid=$!
+  # the guard must not hold our output open, or $(...) would wait for its sleep
+  ( sleep "$secs"; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null & guard=$!
+  wait "$pid" 2>/dev/null; kill "$guard" 2>/dev/null
+  cat "$out"; rm -f "$out"; }
+
+# --- find the TVs (saved addresses first; rescan the network if any went missing) ---
+reachable() { [ "$(limit 15 adb -s "$1" shell getprop sys.boot_completed | tr -d '\r')" = "1" ]; }
+TVS=$(tr -d '\r' < tv-addresses.txt 2>/dev/null)
+missing=0
+for t in $TVS; do adb connect "$t" >/dev/null 2>&1; reachable "$t" || missing=1; done
+if [ $missing = 1 ]; then
   found=$(powershell.exe -NoProfile -Command '
     $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -like "Wi-Fi*" -or $_.InterfaceAlias -like "Ethernet*" } | Where-Object { $_.IPAddress -notlike "169.*" } | Select-Object -First 1).IPAddress
     if (-not $ip) { exit }
@@ -22,15 +32,19 @@ if [ "$(adb -s "$TV" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
     $jobs | ForEach-Object { $_.c.Dispose() }' 2>/dev/null | tr -d '\r')
   for ip in $found; do
     adb connect "$ip:5555" >/dev/null 2>&1
-    if adb -s "$ip:5555" shell getprop ro.product.brand 2>/dev/null | grep -q TCL; then TV="$ip:5555"; echo "$TV" > tv-address.txt; break; fi
+    if adb -s "$ip:5555" shell getprop ro.product.name 2>/dev/null | grep -q G10_4K_US_NF; then
+      grep -qx "$ip:5555" tv-addresses.txt || { echo "$ip:5555" >> tv-addresses.txt; log "found TV at new address $ip"; }
+    fi
   done
-fi
-if [ "$(adb -s "$TV" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; then
-  log "TV not reachable (off or not on this network) - nothing to do"; exit 0
+  TVS=$(tr -d '\r' < tv-addresses.txt)
 fi
 
+heal_tv() {
+TV=$1
+if ! reachable "$TV"; then log "$TV not reachable (off, or address changed) - skipped"; return; fi
 A="adb -s $TV shell"
-sh_() { $A -n "$1" </dev/null 2>/dev/null | tr -d '\r'; }
+# Every TV command has a time limit, so a TV going into standby can't hang the run.
+sh_() { limit 20 adb -s "$TV" shell -n "$1" | tr -d '\r'; }
 fixed=""
 
 # --- debloat: re-disable anything a firmware update turned back on ----------
@@ -56,11 +70,13 @@ if ! sh_ "pm list packages -e $LAUNCHER" | grep -qx "package:$LAUNCHER"; then
   fi
 fi
 home=$(sh_ 'cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME' | tail -1)
-if [ "$home" != "$LAUNCHER/.MainActivity" ]; then
+if [ -n "$home" ] && [ "$home" != "$LAUNCHER/.MainActivity" ]; then
   sh_ "cmd package set-home-activity $LAUNCHER/.MainActivity" >/dev/null; fixed="$fixed home"
 fi
 setting() { # namespace key value
-  [ "$(sh_ "settings get $1 $2")" = "$3" ] || { sh_ "settings put $1 $2 $3" >/dev/null; fixed="$fixed $2"; }
+  cur=$(sh_ "settings get $1 $2")
+  [ -z "$cur" ] && return   # no answer from the TV: don't guess
+  [ "$cur" = "$3" ] || { sh_ "settings put $1 $2 $3" >/dev/null; fixed="$fixed $2"; }
 }
 setting secure screensaver_components "$LAUNCHER/.TroopDream"
 setting secure screensaver_default_component "$LAUNCHER/.TroopDream"
@@ -73,6 +89,10 @@ setting global tcl_uxp_status 0
 setting global tcl_diagnostic_status 0
 setting global tcl_app_ssm_switch 0
 
-if [ -n "$fixed" ]; then log "healed:$fixed"; else log "ok - nothing to fix"; fi
+reachable "$TV" || { log "$TV went offline during the check (standby?) - will retry next run"; return; }
+if [ -n "$fixed" ]; then log "$TV healed:$fixed"; else log "$TV ok - nothing to fix"; fi
+}
+
+for t in $TVS; do heal_tv "$t"; done
 # keep the log small
 tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
