@@ -20,11 +20,11 @@ heal.log.tmp
 tv-addresses.txt
 routine-*.json
 heal.disabled
-heal-skip.txt
 setup-extra-*.txt
 troop82-launcher/troop82-launcher.version
 troop82-launcher/out/
 tv-serials.txt
+tv-serials.tmp
 sheet-pending-*
 tv-preregister.txt
 tv-preregister.tmp

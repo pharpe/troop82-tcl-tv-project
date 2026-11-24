@@ -5,8 +5,8 @@
 # apps or reset settings), and installs a newer launcher build if one was made on this PC.
 # Changes nothing that is already correct. Log: C:/tcl/heal.log
 #
-# Pausing: create C:/tcl/heal.disabled to pause all TVs, or put a TV's address or serial
-# number in C:/tcl/heal-skip.txt to leave just that TV alone (the undo scripts do this).
+# Pausing: create C:/tcl/heal.disabled to pause it. Only TVs registered in tv-serials.txt
+# are ever changed (the undo scripts unregister a TV).
 cd "$(dirname "$0")"
 LOG=./heal.log
 LAUNCHER=org.troop82.launcher
@@ -16,14 +16,11 @@ VERFILE=troop82-launcher/release/troop82-launcher.version
 RUN_DEADLINE=$(( $(date +%s) + 480 ))   # finish well inside the task's 10-minute limit
 log() { echo "$(date '+%Y-%m-%d %H:%M') $*" >> "$LOG"; }
 lines() { [ -f "$1" ] && tr -d '\r' < "$1" | grep -v '^[[:space:]]*$'; }
-# append a line safely (adds a missing final newline first; skips duplicates)
+# append a line safely (adds a missing final newline first; no duplicates)
 add_line() { f=$1; v=$2
   lines "$f" | grep -qxF "$v" && return
   [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"
   echo "$v" >> "$f"; }
-# skip-list entries may be "192.168.1.174", "192.168.1.174:5555" or a serial; spaces ignored
-norm() { tr -d ' \t\r' | sed 's/:5555$//'; }
-skipped() { v=$(printf '%s' "$1" | norm); lines heal-skip.txt | norm | grep -qxF "$v"; }
 # Only TVs registered by setup-tv.sh (serial in tv-serials.txt) are ever changed.
 registered() { [ -n "$1" ] && lines tv-serials.txt | grep -qxF "$1"; }
 sheet_link() { [ -f local.env ] && tr -d '\r' < local.env | sed -n 's/^SHEET_CSV_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p'; }
@@ -51,7 +48,6 @@ if [ ! -f tv-addresses.txt ]; then log "ERROR tv-addresses.txt is missing - no T
 TVS=$(lines tv-addresses.txt)
 missing=0
 for t in $TVS; do
-  skipped "$t" && continue            # never contact a TV the owner asked us to leave alone
   limit 15 adb connect "$t" >/dev/null; reachable "$t" || missing=1
 done
 if [ $missing = 1 ] && [ -s tv-macs.txt ]; then
@@ -71,14 +67,13 @@ if [ $missing = 1 ] && [ -s tv-macs.txt ]; then
     Get-NetNeighbor -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { \$_.LinkLayerAddress -match '^($macs)\$' } | ForEach-Object { \$_.IPAddress }" 2>/dev/null | tr -d '\r')
   for ip in $found; do
     lines tv-addresses.txt | grep -qxF "$ip:5555" && continue
-    skipped "$ip" && continue
     limit 15 adb connect "$ip:5555" >/dev/null
     if ! adb devices | tr -d '\r' | grep -qE "^$ip:5555[[:space:]]+device$"; then
       limit 15 adb disconnect "$ip:5555" >/dev/null; continue
     fi
     s=$(limit 15 adb -s "$ip:5555" shell getprop ro.serialno | tr -d '\r\n')
-    # adopt only a TV this script already manages (never an unknown or skipped TV)
-    if [ -n "$s" ] && lines tv-serials.txt | grep -qxF "$s" && ! skipped "$s"; then
+    # adopt only a TV this script already manages (never an unknown TV)
+    if [ -n "$s" ] && lines tv-serials.txt | grep -qxF "$s"; then
       # forget the TV's old address (tv-map.txt: "serial address"), then record the new one
       old=$(lines tv-map.txt | awk -v s="$s" '$1 == s { print $2; exit }')
       # drop the old address only if nothing answers there any more (another TV may have it now)
@@ -95,10 +90,8 @@ fi
 
 heal_tv() {
 TV=$1
-if skipped "$TV"; then log "$TV skipped (listed in heal-skip.txt)"; return; fi
-if ! reachable "$TV"; then log "$TV not reachable (off, standby, or address changed) - skipped"; return; fi
+if ! reachable "$TV"; then log "$TV not reachable (off, standby, or address changed) - next run"; return; fi
 serial=$(limit 15 adb -s "$TV" shell getprop ro.serialno | tr -d '\r\n')
-if [ -n "$serial" ] && skipped "$serial"; then log "$TV skipped (serial is in heal-skip.txt)"; return; fi
 # One-time registration of TVs set up before serials were recorded: tv-preregister.txt holds
 # "address package" lines; a TV at that address that has that (otherwise rare) package
 # installed is registered once, and its line is removed.
@@ -141,7 +134,7 @@ sh_() {
 fixed=""
 enabled_pkgs=$(sh_ "pm list packages -e" | sed 's/^package://')
 all_pkgs=$(sh_ "pm list packages" | sed 's/^package://')
-if [ -z "$all_pkgs" ]; then log "$TV did not answer the package query - skipped"; rm -f "$OFF"; return; fi
+if [ -z "$all_pkgs" ]; then log "$TV did not answer the package query - next run"; rm -f "$OFF"; return; fi
 is_enabled() { printf '%s\n' "$enabled_pkgs" | grep -qxF "$1"; }
 is_present() { printf '%s\n' "$all_pkgs" | grep -qxF "$1"; }
 # remember this registered TV's network hardware address, to find it again if its IP changes

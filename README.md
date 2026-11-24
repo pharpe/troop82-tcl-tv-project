@@ -12,7 +12,7 @@ Setup, debloat and a custom home screen for Troop 82's TCL Google TV
 | `qa.sh [ip]` | Health check, about 50 checks per TV |
 | `heal.sh` + `install-heal-task.ps1` | Daily Windows task: finds every TV in `tv-addresses.txt` (and rescans if an address changes) and re-applies the setup if a TCL update changed anything |
 | `phase1-packages.txt` | Every app disabled during debloat |
-| `undo-phase1.sh <ip>`, `undo-phase3.sh <ip>` | Re-enable debloated apps / restore the Google TV home screen on one TV (and pause self-heal for it) |
+| `undo-phase1.sh <ip>`, `undo-phase3.sh <ip>` | Re-enable debloated apps / restore the Google TV home screen on one TV (and unregister it) |
 | `TCL-TV-plan.md` | Original findings and plan |
 | `logo/` | Troop 82 badge and TV background artwork |
 | `ui.py`, `ui.sh` | Helper: dump the TV's on-screen text over ADB |
@@ -54,13 +54,12 @@ cd troop82-launcher
 Self-heal (daily task on this PC) installs a released build on every **registered** TV the next
 time that TV is on the same network as this PC. A plain `./build.sh` never rolls out.
 
-### Registered TVs and the skip list
+### Registered TVs
 
 - `setup-tv.sh <ip>` registers a TV by serial number in `tv-serials.txt` (local, not in git).
   Self-heal, `build.sh install` and `set-sheet.sh` never touch an unregistered TV, even if it
   answers at a known address.
-- `heal-skip.txt` (address or serial, one per line) makes everything leave that TV alone.
-  The undo scripts add the TV to it automatically.
+- The undo scripts unregister a TV; `setup-tv.sh` registers it again.
 - Self-heal pauses entirely while `heal.disabled` exists.
 - **Give each TV a fixed address** (a DHCP reservation in the router). Self-heal can find a
   registered TV that moved (by its recorded network hardware address), but a TV that has never

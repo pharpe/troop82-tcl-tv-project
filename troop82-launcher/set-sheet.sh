@@ -16,11 +16,9 @@ fi
 targets="$*"; [ -z "$targets" ] && targets=$(tr -d '\r' < ../tv-addresses.txt)
 for t in $targets; do
   case "$t" in *:*) ;; *) t="$t:5555";; esac
-  if tr -d '\r \t' < ../heal-skip.txt 2>/dev/null | sed 's/:5555$//' | grep -qxF "${t%:5555}"; then echo "$t: skipped (in heal-skip.txt)"; continue; fi
   adb connect "$t" >/dev/null 2>&1
   s=$(adb -s "$t" shell getprop ro.serialno 2>/dev/null | tr -d '\r\n')
-  if ! tr -d '\r' < ../tv-serials.txt 2>/dev/null | grep -qxF "$s"; then echo "$t: not a registered Troop 82 TV (run setup-tv.sh) - skipped"; continue; fi
-  if tr -d '\r \t' < ../heal-skip.txt 2>/dev/null | grep -qxF "$s"; then echo "$t: skipped (serial in heal-skip.txt)"; continue; fi
+  if ! tr -d '\r' < ../tv-serials.txt 2>/dev/null | grep -qxF "$s"; then echo "$t: not a registered Troop 82 TV (run setup-tv.sh) - not changed"; continue; fi
   r=$(adb -s "$t" shell am broadcast -f 0x20 -n org.troop82.launcher/.ConfigReceiver --es sheet_url "'$url'" | grep -oE 'data="[^"]*"')
   echo "$t: ${r:-no reply}"
   case "$r" in *"sheet set"*|*"sheet cleared"*) rm -f "../sheet-pending-$s";; esac
