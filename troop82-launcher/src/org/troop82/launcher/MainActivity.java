@@ -51,7 +51,7 @@ public class MainActivity extends Activity implements Tiles.FocusListener {
     /** Re-download announcements and events this often while the home screen is showing. */
     static final long REFRESH_MS = 15 * 60 * 1000;
 
-    /** Set from a PC with: adb shell am start -n org.troop82.launcher/.MainActivity --es sheet_url "<published CSV link>" */
+    /** Set from the maintenance PC through {@link ConfigReceiver} (see set-sheet.sh). */
     static final String EXTRA_SHEET_URL = "sheet_url";
     static final String PREF_SHEET_URL = "sheet_url";
 
@@ -73,15 +73,8 @@ public class MainActivity extends Activity implements Tiles.FocusListener {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(buildLayout());
-        handleConfigIntent(getIntent());
     }
 
-    @Override
-    protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        setIntent(intent);
-        handleConfigIntent(intent);
-    }
 
     @Override
     protected void onPause() {
@@ -93,14 +86,6 @@ public class MainActivity extends Activity implements Tiles.FocusListener {
         return getSharedPreferences("config", MODE_PRIVATE);
     }
 
-    private void handleConfigIntent(Intent intent) {
-        if (intent == null || !intent.hasExtra(EXTRA_SHEET_URL)) return;
-        String url = intent.getStringExtra(EXTRA_SHEET_URL);
-        // Apply once, so a later re-creation of the activity can't undo a newer setting.
-        intent.removeExtra(EXTRA_SHEET_URL);
-        prefs().edit().putString(PREF_SHEET_URL, url == null ? "" : url.trim()).apply();
-        loadNews();
-    }
 
     /** Refreshes on the shared background worker, then updates the panel on the main thread. */
     private void loadNews() {

@@ -2,7 +2,7 @@
 # Troop 82 TV health check. Run from Git Bash: /c/tcl/qa.sh
 # Prints PASS/FAIL/WARN per check and a summary. Safe to re-run any time
 # (it opens apps and returns Home, but changes no settings).
-TV="${1:-192.168.1.174}"; case "$TV" in *:*) ;; *) TV="$TV:5555";; esac
+TV="${1:?usage: qa.sh <tv-ip>   (it opens apps and inputs on that TV)}"; case "$TV" in *:*) ;; *) TV="$TV:5555";; esac
 A="adb -s $TV shell"
 LAUNCHER=org.troop82.launcher
 pass=0; fail=0; warn=0
@@ -62,18 +62,22 @@ $A input keyevent KEYCODE_DPAD_CENTER; sleep 2
 echo "== Data feeds"
 files=$(sh_ "run-as $LAUNCHER ls files" 2>/dev/null)
 if [ -z "$files" ]; then note "Can't read cache (release build blocks run-as); checked on screen instead"; else
-  for f in sheet.csv cal0.ics cal1.ics cal2.ics cal3.ics; do echo "$files" | grep -qx "$f" && ok "cached $f" || bad "missing cache $f"; done
+  echo "$files" | grep -q '^sheet-.*\.csv$' && ok "cached sheet" || bad "missing cached sheet"
+  for f in cal0.ics cal1.ics cal2.ics cal3.ics; do echo "$files" | grep -qx "$f" && ok "cached $f" || bad "missing cache $f"; done
 fi
 # The sheet's published CSV link lives in local.env (not in git), e.g.
 #   SHEET_CSV_URL="https://docs.google.com/spreadsheets/d/<id>/export?format=csv"
-[ -f /c/tcl/local.env ] && . /c/tcl/local.env
+[ -f /c/tcl/local.env ] && SHEET_CSV_URL=$(tr -d '\r' < /c/tcl/local.env | sed -n 's/^SHEET_CSV_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p')
 if [ -z "$SHEET_CSV_URL" ]; then note "SHEET_CSV_URL not set in local.env; skipped sheet check"
 else curl -fsSL "$SHEET_CSV_URL" | head -1 | grep -q "^Message" \
   && ok "Announcements sheet is reachable as CSV" || bad "Announcements sheet not reachable (sharing changed?)"; fi
 
 echo "== Crashes since boot"
-c=$(sh_ "logcat -d -b crash" | grep -ciE "$LAUNCHER|FATAL")
-[ "$c" = "0" ] && ok "No crashes in crash log" || bad "$c crash-log lines (adb shell logcat -d -b crash)"
+# only the launcher's own crashes count; other apps' crashes are noted
+c=$(sh_ "logcat -d -b crash" | grep -c "Process: $LAUNCHER")
+[ "$c" = "0" ] && ok "No launcher crashes since boot" || bad "$c launcher crash(es) (adb shell logcat -d -b crash)"
+o=$(sh_ "logcat -d -b crash" | grep -oE "Process: [a-z0-9._]+" | grep -v "$LAUNCHER" | sort -u | tr '\n' ' ')
+[ -z "$o" ] || note "Other apps crashed since boot: $o"
 anr=$(sh_ "ls /data/anr 2>/dev/null" | wc -l)
 sh_ "dumpsys activity processes" | grep -q "$LAUNCHER.*ANR" && bad "Launcher ANR" || ok "No launcher ANR"
 
@@ -87,16 +91,18 @@ done
 
 echo "== Debloat still applied (firmware updates can undo it)"
 reenabled=""
-while read p; do [ -z "$p" ] && continue
-  # disabled, or removed for this user, both count as debloated
+# disabled, or removed for this user, both count as debloated (CRs stripped for Windows checkouts)
+for p in $(tr -d '\r' < /c/tcl/phase1-packages.txt; tr -d '\r' < /c/tcl/phase3-packages.txt); do
   sh_ "pm list packages -e $p" | grep -qx "package:$p" && reenabled="$reenabled $p"
-done < /c/tcl/phase1-packages.txt
-for p in com.google.android.apps.tv.launcherx com.google.android.tungsten.setupwraith; do
-  sh_ "pm list packages -d $p" | grep -qx "package:$p" || reenabled="$reenabled $p"; done
-[ -z "$reenabled" ] && ok "All debloated apps still disabled" || note "Re-enabled:$reenabled"
+done
+[ -z "$reenabled" ] && ok "All debloated apps still disabled (phase 1 and 3 lists)" || bad "Re-enabled:$reenabled"
+sh_ "pm list packages tv.samba.ssm.ui" | grep -q samba && bad "Samba TV viewing tracker is back" || ok "Samba TV viewing tracker removed"
+[ -z "$(sh_ 'settings get secure enabled_accessibility_services' | grep -v '^null$')" ] && ok "No accessibility services hooking Home" || note "Accessibility service enabled: $(sh_ 'settings get secure enabled_accessibility_services')"
 
 echo "== Privacy / settings"
+[ "$(sh_ 'settings get global private_dns_mode')" = "hostname" ] && ok "Private DNS mode is hostname" || bad "Private DNS mode is $(sh_ 'settings get global private_dns_mode')"
 [ "$(sh_ 'settings get global private_dns_specifier')" = "dns.adguard-dns.com" ] && ok "AdGuard DNS set" || bad "Private DNS not AdGuard"
+[ "$(sh_ 'settings get global tcl_app_ssm_switch')" = "0" ] && ok "TCL/Samba data switch off" || bad "tcl_app_ssm_switch is on"
 sh_ 'dumpsys connectivity' | grep -q "ValidatedPrivateDnsAddresses: \[9" && ok "Private DNS validated" || note "Private DNS not validated right now"
 sh_ 'ping -c1 -W3 doubleclick.net' | grep -qE "127.0.0.1|0.0.0.0|unknown host|100% packet loss" && ok "Ad domain blocked" || bad "Ad domain resolves"
 sh_ 'ping -c1 -W3 plex.tv' | grep -q "bytes from\|PING plex.tv (" && ok "Normal sites resolve" || bad "Normal DNS broken"
@@ -106,8 +112,9 @@ sh_ 'ping -c1 -W3 plex.tv' | grep -q "bytes from\|PING plex.tv (" && ok "Normal 
 
 echo "== Resources"
 mem=$(sh_ "dumpsys meminfo $LAUNCHER" | grep -m1 "TOTAL PSS" | awk '{print $3}')
-echo "INFO  launcher memory: $((mem/1024)) MB"
-echo "INFO  free memory: $(( $(sh_ 'grep MemAvailable /proc/meminfo' | awk '{print $2}') / 1024 )) MB"
+echo "INFO  launcher memory: $(( ${mem:-0} / 1024 )) MB"
+free=$(sh_ 'grep MemAvailable /proc/meminfo' | awk '{print $2}')
+echo "INFO  free memory: $(( ${free:-0} / 1024 )) MB"
 echo "INFO  free storage: $(sh_ 'df -h /data' | tail -1 | awk '{print $4}')"
 
 $A input keyevent KEYCODE_HOME

@@ -105,71 +105,130 @@ final class Announcements {
         void onLoaded(Snapshot snapshot);
     }
 
-    // One shared worker for the whole app: refreshes never pile up, and the home
+    // One shared worker for the whole app: downloads never pile up, and the home
     // screen and screensaver never write the cache files at the same time.
     private static final ExecutorService WORKER = Executors.newSingleThreadExecutor();
-    private static final AtomicBoolean BUSY = new AtomicBoolean(false);
+    /** Cache reads get their own thread so they never wait behind a slow download. */
+    private static final ExecutorService CACHE_READER = Executors.newSingleThreadExecutor();
+    /** A download that is still trickling in after this long is abandoned. */
+    private static final long DOWNLOAD_DEADLINE_MS = 60_000;
+    private static final Object FILE_LOCK = new Object();
+    private static final Object LOCK = new Object();
+    private static boolean busy;
+    /** Callers that asked while a download was already running; they get its result. */
+    private static final List<Callback> WAITING = new ArrayList<>();
 
     private Announcements() {}
 
     /**
-     * Starts a background refresh unless one is already running. Never throws:
-     * any failure simply leaves the previous snapshot on screen.
+     * Delivers the cached snapshot right away (so nothing waits on the network),
+     * then downloads fresh data and delivers again. If a download is already
+     * running, the caller simply receives that download's result too.
+     * Never throws: any failure leaves the previous snapshot on screen.
      */
     static void loadAsync(Context context, final String sheetCsvUrl, final Callback cb) {
-        if (!BUSY.compareAndSet(false, true)) return;
         final Context app = context.getApplicationContext();
-        WORKER.execute(new Runnable() {
+        final boolean startDownload;
+        synchronized (LOCK) {
+            WAITING.add(cb);
+            startDownload = !busy;
+            busy = true;
+        }
+        CACHE_READER.execute(new Runnable() {
             @Override
             public void run() {
                 try {
-                    cb.onLoaded(load(app, sheetCsvUrl));
-                } catch (Throwable t) {
-                    // Keep whatever is already showing.
-                } finally {
-                    BUSY.set(false);
+                    cb.onLoaded(load(app, sheetCsvUrl, false));
+                } catch (Throwable ignored) {
+                    // no cache yet
+                }
+            }
+        });
+        if (!startDownload) return;
+        WORKER.execute(new Runnable() {
+            @Override
+            public void run() {
+                Snapshot fresh = null;
+                try {
+                    fresh = load(app, sheetCsvUrl, true);
+                } catch (Throwable ignored) {
+                    // keep whatever is showing
+                }
+                List<Callback> deliver;
+                synchronized (LOCK) {
+                    deliver = new ArrayList<>(WAITING);
+                    WAITING.clear();
+                    busy = false;
+                }
+                if (fresh == null) return;
+                for (Callback c : deliver) {
+                    try {
+                        c.onLoaded(fresh);
+                    } catch (Throwable ignored) {
+                        // one bad receiver must not stop the others
+                    }
                 }
             }
         });
     }
 
-    /** Downloads (or falls back to cache) and parses everything. Call off the main thread. */
-    static Snapshot load(Context c, String sheetCsvUrl) {
+    /**
+     * Parses everything; with {@code network} it downloads first and falls back to
+     * the cache, without it it reads the cache only. Call off the main thread.
+     */
+    static Snapshot load(Context c, String sheetCsvUrl, boolean network) {
+        Date now = new Date();
         List<String> messages = new ArrayList<>();
         if (sheetCsvUrl != null && sheetCsvUrl.startsWith("https://")) {
-            String csv = fetchCached(c, sheetCsvUrl, "sheet.csv", false);
-            if (csv != null) messages = parseSheet(csv, new Date());
+            try {
+                // cache name follows the link, so a changed link never shows the old sheet
+                String cacheName = "sheet-" + Integer.toHexString(sheetCsvUrl.hashCode()) + ".csv";
+                String csv = fetchCached(c, sheetCsvUrl, cacheName, false, network);
+                if (csv != null) messages = parseSheet(csv, now);
+            } catch (RuntimeException e) {
+                // a broken sheet must not hide the calendar
+            }
         }
 
         List<Event> events = new ArrayList<>();
-        Date now = new Date();
         for (int i = 0; i < CALENDARS.length; i++) {
-            String ics = fetchCached(c, CALENDARS[i].url, "cal" + i + ".ics", true);
-            if (ics != null) events.addAll(parseIcs(ics, CALENDARS[i], now));
+            try {
+                String ics = fetchCached(c, CALENDARS[i].url, "cal" + i + ".ics", true, network);
+                if (ics != null) events.addAll(parseIcs(ics, CALENDARS[i], now));
+            } catch (RuntimeException e) {
+                // one broken feed must not hide the others
+            }
         }
         return new Snapshot(messages, upcoming(events, now));
     }
 
     // ---------------------------------------------------------------- download
 
-    private static String fetchCached(Context c, String url, String cacheName, boolean ics) {
+    private static String fetchCached(Context c, String url, String cacheName, boolean ics, boolean network) {
         AtomicFile cache = new AtomicFile(new File(c.getFilesDir(), cacheName));
         try {
+            if (!network) throw new IOException("cache only");
             String body = download(url);
             if (!looksValid(body, ics)) throw new IOException("unexpected content");
-            FileOutputStream out = cache.startWrite();
-            try {
-                out.write(body.getBytes(StandardCharsets.UTF_8));
-                cache.finishWrite(out);
-            } catch (IOException e) {
-                cache.failWrite(out);
+            // Only the file operations are locked (never the download), so a cache read
+            // can't delete a write in progress, and reads never wait on the network.
+            synchronized (FILE_LOCK) {
+                FileOutputStream out = cache.startWrite();
+                try {
+                    out.write(body.getBytes(StandardCharsets.UTF_8));
+                    cache.finishWrite(out);
+                } catch (IOException e) {
+                    cache.failWrite(out);
+                }
             }
             return body;
         } catch (IOException | RuntimeException e) {
-            try {
-                return new String(cache.readFully(), StandardCharsets.UTF_8);
-            } catch (IOException none) {
-                return null;
+            synchronized (FILE_LOCK) {
+                try {
+                    return new String(cache.readFully(), StandardCharsets.UTF_8);
+                } catch (IOException none) {
+                    return null;
+                }
             }
         }
     }
@@ -204,9 +263,11 @@ final class Announcements {
         ByteArrayOutputStream buf = new ByteArrayOutputStream();
         byte[] chunk = new byte[8192];
         int n;
+        long deadline = System.currentTimeMillis() + DOWNLOAD_DEADLINE_MS;
         while ((n = in.read(chunk)) > 0) {
             buf.write(chunk, 0, n);
             if (buf.size() > MAX_BYTES) throw new IOException("too large");
+            if (System.currentTimeMillis() > deadline) throw new IOException("download too slow");
         }
         return buf.toString("UTF-8");
     }
@@ -309,7 +370,7 @@ final class Announcements {
 
         String tzid() {
             Matcher m = Pattern.compile("TZID=([^;:]+)").matcher(params);
-            return m.find() ? m.group(1) : null;
+            return m.find() ? m.group(1).replace("\"", "") : null;   // TZID may be quoted
         }
     }
 
@@ -341,14 +402,17 @@ final class Announcements {
         List<String> blocks = new ArrayList<>();
         Matcher m = VEVENT.matcher(text);
         while (m.find()) {
-            String block = m.group(1);
+            // drop reminders nested in the event (their SUMMARY is not the event's title)
+            String block = m.group(1).replaceAll("(?s)BEGIN:VALARM.*?END:VALARM", "");
             blocks.add(block);
             String uid = null;
             Date recurrenceId = null;
             for (String line : block.split("\n")) {
+                Prop p = prop(line);
+                if (p == null) continue;  // malformed line: ignore it
                 String n = name(line);
-                if (n.equals("UID")) uid = prop(line).value;
-                else if (n.equals("RECURRENCE-ID")) recurrenceId = parseIcsDate(prop(line));
+                if (n.equals("UID")) uid = p.value;
+                else if (n.equals("RECURRENCE-ID")) recurrenceId = parseIcsDate(p);
             }
             if (uid != null && recurrenceId != null) overridden.add(uid + "@" + recurrenceId.getTime());
         }
@@ -391,7 +455,10 @@ final class Announcements {
                 out.add(new Event(s, new Date(s.getTime() + duration), allDay, summary, feed));
                 continue;
             }
-            for (Date occ : expand(s, rrule, windowStart, windowEnd, duration)) {
+            // repeat in the event's own time zone (UTC for "Z" times), so DST is handled right
+            TimeZone tz = start.value.endsWith("Z") ? TimeZone.getTimeZone("UTC")
+                    : start.tzid() != null ? TimeZone.getTimeZone(start.tzid()) : TimeZone.getDefault();
+            for (Date occ : expand(s, rrule, windowStart, windowEnd, duration, tz)) {
                 if (containsTime(exdates, occ)) continue;
                 if (uid != null && overridden.contains(uid + "@" + occ.getTime())) continue;
                 out.add(new Event(occ, new Date(occ.getTime() + duration), allDay, summary, feed));
@@ -405,12 +472,24 @@ final class Announcements {
         return false;
     }
 
-    /** Expands DAILY / WEEKLY (with BYDAY) / MONTHLY / YEARLY rules into the window. */
+    /**
+     * Expands an RRULE into occurrences inside the window. Supports FREQ=DAILY,
+     * WEEKLY (BYDAY, WKST), MONTHLY (BYDAY with ordinals like 1TU/-1FR, BYMONTHDAY)
+     * and YEARLY, with INTERVAL, COUNT and UNTIL. Each period is computed from
+     * DTSTART, so dates never drift (e.g. "the 31st" skips short months instead
+     * of sliding to the 28th). Wall-clock time of DTSTART is kept.
+     */
     static List<Date> expand(Date first, String rrule, Date windowStart, Date windowEnd, long duration) {
+        return expand(first, rrule, windowStart, windowEnd, duration, TimeZone.getDefault());
+    }
+
+    static List<Date> expand(Date first, String rrule, Date windowStart, Date windowEnd, long duration, TimeZone tz) {
         String freq = null;
-        int interval = 1, count = -1;
+        int interval = 1, count = -1, wkst = Calendar.MONDAY;
         Date until = null;
-        List<Integer> byDay = new ArrayList<>();
+        List<int[]> byDay = new ArrayList<>();      // {ordinal (0 = every), Calendar day-of-week}
+        List<Integer> byMonthDay = new ArrayList<>();
+        List<Integer> byMonth = new ArrayList<>();
         for (String part : rrule.split(";")) {
             String[] kv = part.split("=", 2);
             if (kv.length != 2) continue;
@@ -418,11 +497,29 @@ final class Announcements {
                 case "FREQ": freq = kv[1]; break;
                 case "INTERVAL": interval = Math.max(1, safeInt(kv[1], 1)); break;
                 case "COUNT": count = safeInt(kv[1], -1); break;
-                case "UNTIL": until = parseIcsDate(new Prop("", kv[1])); break;
+                case "UNTIL":
+                    until = parseIcsDate(new Prop("", kv[1]));
+                    // a date-only UNTIL includes that whole day
+                    if (until != null && kv[1].length() == 8) until = new Date(addDays(until, 1).getTime() - 1);
+                    break;
+                case "BYMONTH":
+                    for (String mo : kv[1].split(",")) {
+                        int v = safeInt(mo, 0);
+                        if (v >= 1 && v <= 12) byMonth.add(v);
+                    }
+                    break;
+                case "WKST": { int d = dayOfWeek(kv[1]); if (d > 0) wkst = d; break; }
                 case "BYDAY":
                     for (String d : kv[1].split(",")) {
                         int dow = dayOfWeek(d.replaceAll("[^A-Z]", ""));
-                        if (dow > 0) byDay.add(dow);
+                        String ord = d.replaceAll("[A-Z]", "");
+                        if (dow > 0) byDay.add(new int[]{ord.isEmpty() ? 0 : safeInt(ord, 0), dow});
+                    }
+                    break;
+                case "BYMONTHDAY":
+                    for (String d : kv[1].split(",")) {
+                        int md = safeInt(d, 0);
+                        if (md != 0) byMonthDay.add(md);
                     }
                     break;
                 default: break;
@@ -431,41 +528,112 @@ final class Announcements {
         List<Date> out = new ArrayList<>();
         if (freq == null) return out;
 
-        Calendar cal = Calendar.getInstance();
-        cal.setTime(first);
+        Calendar base = Calendar.getInstance(tz);
+        base.setTime(first);
+        Date stopAfter = addDays(windowEnd, 400);   // safety: a period this far out can't matter
+        // Without COUNT, jump close to the window instead of walking from a years-old DTSTART.
+        int kStart = 0;
+        if (count < 0 && windowStart.after(first)) {
+            long days = (windowStart.getTime() - first.getTime()) / 86_400_000L;
+            long perPeriod = freq.equals("DAILY") ? interval : freq.equals("WEEKLY") ? 7L * interval
+                    : freq.equals("MONTHLY") ? 31L * interval : 366L * interval;
+            kStart = (int) Math.max(0, days / perPeriod - 2);
+        }
         int produced = 0;
-        for (int step = 0; step < MAX_OCCURRENCES * 7; step++) {
-            List<Date> candidates = new ArrayList<>();
-            if (freq.equals("WEEKLY") && !byDay.isEmpty()) {
-                Calendar week = (Calendar) cal.clone();
-                week.set(Calendar.DAY_OF_WEEK, week.getFirstDayOfWeek());
-                for (int i = 0; i < 7; i++) {
-                    if (byDay.contains(week.get(Calendar.DAY_OF_WEEK)) && !week.getTime().before(first)) {
-                        candidates.add(week.getTime());
+        for (int k = kStart; k < kStart + MAX_OCCURRENCES * 10; k++) {
+            List<Calendar> cands = new ArrayList<>();
+            Calendar period = (Calendar) base.clone();
+            switch (freq) {
+                case "DAILY":
+                    period.add(Calendar.DAY_OF_YEAR, k * interval);
+                    if (byDay.isEmpty() || hasDay(byDay, period.get(Calendar.DAY_OF_WEEK))) cands.add(period);
+                    break;
+                case "WEEKLY": {
+                    while (period.get(Calendar.DAY_OF_WEEK) != wkst) period.add(Calendar.DAY_OF_YEAR, -1);
+                    period.add(Calendar.DAY_OF_YEAR, 7 * k * interval);
+                    for (int i = 0; i < 7; i++) {
+                        Calendar d = (Calendar) period.clone();
+                        d.add(Calendar.DAY_OF_YEAR, i);
+                        int dow = d.get(Calendar.DAY_OF_WEEK);
+                        boolean match = byDay.isEmpty() ? dow == base.get(Calendar.DAY_OF_WEEK) : hasDay(byDay, dow);
+                        if (match) cands.add(d);
                     }
-                    week.add(Calendar.DAY_OF_YEAR, 1);
+                    break;
                 }
-            } else {
-                candidates.add(cal.getTime());
+                case "MONTHLY": {
+                    period.set(Calendar.DAY_OF_MONTH, 1);
+                    period.add(Calendar.MONTH, k * interval);
+                    cands.addAll(daysInMonth(period, byMonthDay, byDay, base.get(Calendar.DAY_OF_MONTH)));
+                    break;
+                }
+                case "YEARLY": {
+                    // e.g. "4th Thursday of November" = BYMONTH=11;BYDAY=4TH
+                    period.set(Calendar.DAY_OF_MONTH, 1);
+                    period.add(Calendar.YEAR, k * interval);
+                    List<Integer> months = byMonth.isEmpty()
+                            ? Collections.singletonList(base.get(Calendar.MONTH) + 1) : byMonth;
+                    for (int mo : months) {
+                        Calendar monthStart = (Calendar) period.clone();
+                        monthStart.set(Calendar.MONTH, mo - 1);
+                        cands.addAll(daysInMonth(monthStart, byMonthDay, byDay, base.get(Calendar.DAY_OF_MONTH)));
+                    }
+                    break;
+                }
+                default:
+                    return out;
             }
-            for (Date d : candidates) {
+            Collections.sort(cands);
+            for (Calendar c : cands) {
+                Date d = c.getTime();
+                if (d.before(first)) continue;
                 if (until != null && d.after(until)) return out;
                 if (count >= 0 && produced >= count) return out;
                 produced++;
                 if (!d.before(windowEnd)) return out;
-                if (d.getTime() + duration > windowStart.getTime() || !d.before(windowStart)) out.add(d);
+                if (d.getTime() + Math.max(duration, 1) > windowStart.getTime()) out.add(d);
             }
-            switch (freq) {
-                case "DAILY": cal.add(Calendar.DAY_OF_YEAR, interval); break;
-                case "WEEKLY": cal.add(Calendar.WEEK_OF_YEAR, interval); break;
-                case "MONTHLY": cal.add(Calendar.MONTH, interval); break;
-                case "YEARLY": cal.add(Calendar.YEAR, interval); break;
-                default: return out;
-            }
-            if (!cal.getTime().before(windowEnd) && !(freq.equals("WEEKLY") && !byDay.isEmpty())) return out;
-            if (cal.getTime().after(addDays(windowEnd, 7))) return out;
+            if (period.getTime().after(stopAfter)) return out;
         }
         return out;
+    }
+
+    /** Days of one month (monthStart = the 1st) selected by BYMONTHDAY, BYDAY (with ordinals), or the start day. */
+    private static List<Calendar> daysInMonth(Calendar monthStart, List<Integer> byMonthDay, List<int[]> byDay, int baseDay) {
+        List<Calendar> out = new ArrayList<>();
+        int max = monthStart.getActualMaximum(Calendar.DAY_OF_MONTH);
+        if (!byMonthDay.isEmpty()) {
+            for (int md : byMonthDay) {
+                int day = md > 0 ? md : max + md + 1;
+                if (day < 1 || day > max) continue;
+                Calendar c = withDay(monthStart, day);
+                // with BYDAY too, both must match (e.g. Friday the 13th)
+                if (byDay.isEmpty() || hasDay(byDay, c.get(Calendar.DAY_OF_WEEK))) out.add(c);
+            }
+        } else if (!byDay.isEmpty()) {
+            for (int[] bd : byDay) {
+                List<Integer> days = new ArrayList<>();
+                for (int day = 1; day <= max; day++) {
+                    if (withDay(monthStart, day).get(Calendar.DAY_OF_WEEK) == bd[1]) days.add(day);
+                }
+                if (bd[0] == 0) for (int day : days) out.add(withDay(monthStart, day));
+                else if (bd[0] > 0 && bd[0] <= days.size()) out.add(withDay(monthStart, days.get(bd[0] - 1)));
+                else if (bd[0] < 0 && -bd[0] <= days.size()) out.add(withDay(monthStart, days.get(days.size() + bd[0])));
+            }
+        } else if (baseDay <= max) {
+            out.add(withDay(monthStart, baseDay));
+        }
+        return out;
+    }
+
+    private static boolean hasDay(List<int[]> byDay, int dow) {
+        for (int[] bd : byDay) if (bd[1] == dow) return true;
+        return false;
+    }
+
+    private static Calendar withDay(Calendar monthStart, int day) {
+        Calendar c = (Calendar) monthStart.clone();
+        c.set(Calendar.DAY_OF_MONTH, day);
+        return c;
     }
 
     private static int safeInt(String s, int dflt) {

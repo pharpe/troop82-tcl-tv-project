@@ -19,3 +19,17 @@ heal.log
 heal.log.tmp
 tv-addresses.txt
 routine-*.json
+heal.disabled
+heal-skip.txt
+setup-extra-*.txt
+troop82-launcher/troop82-launcher.version
+troop82-launcher/out/
+tv-serials.txt
+sheet-pending-*
+tv-preregister.txt
+tv-preregister.tmp
+/troop82-launcher/release/
+tv-macs.txt
+tv-map.txt
+tv-map.tmp
+tv-addresses.tmp

@@ -65,6 +65,8 @@ public class TroopDream extends DreamService {
     private TextView headline;
     private TextView detail;
     private LinearLayout dots;
+    private View clockView;
+    private View footerView;
     private ValueAnimator drift;
     private final List<ValueAnimator> animators = new ArrayList<>();
     private boolean alive;
@@ -139,8 +141,7 @@ public class TroopDream extends DreamService {
         backdrop.setScaleType(ImageView.ScaleType.CENTER_CROP);
         root.addView(backdrop, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        backdrop.setPivotX(0);
-        backdrop.setPivotY(0);
+        // zoom from the centre so every part of the picture (including the badge) moves
         ObjectAnimator zoomX = ObjectAnimator.ofFloat(backdrop, View.SCALE_X, 1f, 1.06f);
         ObjectAnimator zoomY = ObjectAnimator.ofFloat(backdrop, View.SCALE_Y, 1f, 1.06f);
         for (ObjectAnimator z : new ObjectAnimator[]{zoomX, zoomY}) {
@@ -160,6 +161,7 @@ public class TroopDream extends DreamService {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextClock clock = new TextClock(this);
+        clockView = clock;
         clock.setFormat12Hour("h:mm");
         clock.setFormat24Hour("H:mm");
         clock.setTextColor(0xEEFFFFFF);
@@ -234,6 +236,7 @@ public class TroopDream extends DreamService {
         fp.leftMargin = dp(56);
         fp.bottomMargin = dp(30);
         root.addView(footer, fp);
+        footerView = footer;
 
         startDrift();
         return root;
@@ -251,6 +254,11 @@ public class TroopDream extends DreamService {
                 float f = (float) a.getAnimatedValue();
                 content.setTranslationX(dp(14) * f);
                 content.setTranslationY(-dp(10) * f);
+                // the clock and footer never change, so shift them too (no burn-in)
+                clockView.setTranslationX(-dp(12) * f);
+                clockView.setTranslationY(dp(8) * f);
+                footerView.setTranslationX(dp(16) * f);
+                footerView.setTranslationY(-dp(6) * f);
             }
         });
         drift.start();
